@@ -36,6 +36,7 @@ final class CommandChannel {
       size <width> <height> resize the window's content
       dump                  the toolbar's views and where they are
       items                 the toolbar's items: visible or in the overflow menu, and their menu items
+      choose <title>        pick a menu item from the items' overflow-menu forms
       trace <seconds>       a line per frame with every slot, glass and text position
       help | quit
     \(DemoLayout.help)
@@ -75,6 +76,15 @@ final class CommandChannel {
                 say(line)
             }
             say("--- end")
+        case "choose":
+            // Picks a menu item by title from the items' overflow-menu forms, as choosing it there would.
+            let title = arguments.joined(separator: " ")
+            let menuItems = controller.allItems.compactMap(\.item.menuFormRepresentation)
+                .flatMap { $0.submenu?.items ?? [$0] }
+            guard let menuItem = menuItems.first(where: { $0.title == title }), let action = menuItem.action else {
+                return say("no menu item \(title)")
+            }
+            say("chose \(title): \(NSApp.sendAction(action, to: menuItem.target, from: menuItem) ? "sent" : "not handled")")
         case "trace":
             let seconds = arguments.first.flatMap(Double.init) ?? 1
             let start = CACurrentMediaTime()

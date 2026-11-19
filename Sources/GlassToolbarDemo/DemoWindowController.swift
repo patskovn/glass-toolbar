@@ -39,9 +39,9 @@ final class DemoWindowController: NSObject, NSToolbarDelegate {
 
         let sidebar = NSSplitViewItem(sidebarWithViewController: Self.pane(width: 250))
         let list = NSSplitViewItem(contentListWithViewController: Self.pane(width: 350))
-        list.minimumThickness = 240
+        list.minimumThickness = 160
         let detail = NSSplitViewItem(viewController: detailPane())
-        detail.minimumThickness = 320
+        detail.minimumThickness = 200
         split.splitViewItems = [sidebar, list, detail]
         window.contentViewController = split
         window.setContentSize(NSSize(width: 1200, height: 640))
@@ -274,9 +274,13 @@ final class DemoWindowController: NSObject, NSToolbarDelegate {
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
+        // The controls give way before the window does: a narrow window is how the overflow menu is tried.
+        let trailing = stack.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -24)
+        trailing.priority = .defaultLow
+        view.clipsToBounds = true
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -24),
+            trailing,
             stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 24),
             layoutField.widthAnchor.constraint(equalTo: stack.widthAnchor),
             help.widthAnchor.constraint(equalTo: stack.widthAnchor),

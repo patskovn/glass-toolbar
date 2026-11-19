@@ -744,7 +744,7 @@ private final class GlassPill {
         self.anchorsTrailing = anchorsTrailing
         self.spacing = spacing
         glass.cornerRadius = GlassPillBar.pillHeight / 2
-        if #available(macOS 27.0, *) { glass.effectIsInteractive = true }
+        glass.effectIsInteractive = true
         content.wantsLayer = true
         content.layer?.masksToBounds = true
         glass.contentView = content

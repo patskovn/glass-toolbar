@@ -7,8 +7,7 @@ disappear. `GlassToolbarItem` draws its own pills and springs them: a pill keeps
 of its buttons stays, buttons blur in and out, one screen's actions morph into the next screen's, and a
 changing pill briefly swells and bridges with its neighbour.
 
-Extracted from [Sickle](https://sickle.app), a Mac mail app. macOS 26 or later; developed and measured
-on macOS 27.
+Extracted from [Sickle](https://sickle.app), a Mac mail app. Requires macOS 27.
 
 ## Use
 

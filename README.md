@@ -2,6 +2,11 @@
 
 Toolbar buttons for AppKit on Liquid Glass pills that animate the way iOS bar buttons do.
 
+![The same toolbar changing between four screens, at half speed. Top: the system's own items snap from one set of buttons to the next. Bottom: GlassToolbarItem's pills spring, blur and morph between them.](Documentation/showcase.gif)
+
+The same toolbar twice, at half speed: the system's items above, `GlassToolbarItem` below. Recorded
+from the demo in this package.
+
 `NSToolbar` snaps when its items change: glass jumps to its new size in one frame, buttons appear and
 disappear. `GlassToolbarItem` draws its own pills and springs them: a pill keeps its identity while any
 of its buttons stays, buttons blur in and out, one screen's actions morph into the next screen's, and a

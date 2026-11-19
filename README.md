@@ -86,3 +86,7 @@ the system's `group` and comparing.
   inset one rather than filling a lone button's pill.
 - A leaving pill finishes in a view added to the window's frame view, above the toolbar.
 - The metrics are today's. If the system's toolbar changes, they need measuring again.
+
+## Licence
+
+MIT. See `LICENSE`.

@@ -11,6 +11,5 @@ let package = Package(
         .target(name: "GlassToolbar"),
         // A window to try the items in, next to the system's own for comparison: `swift run GlassToolbarDemo`.
         .executableTarget(name: "GlassToolbarDemo", dependencies: ["GlassToolbar"]),
-        .testTarget(name: "GlassToolbarTests", dependencies: ["GlassToolbar"]),
     ]
 )

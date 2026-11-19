@@ -5,7 +5,7 @@ import SwiftUI // only for `Spring`, the spring maths SwiftUI and UIKit bars use
 ///
 /// Used like an `NSToolbarItemGroup`: where a group takes `subitems` and AppKit puts them on one piece of
 /// glass, this takes `groups` — one array of views per pill — and draws the glass itself. Views are
-/// usually `GlassToolbarButton`s; any other view (the Rive refresh glyph) is hosted at its fitting size.
+/// usually `GlassToolbarButton`s; any other view is hosted at its fitting size.
 ///
 /// Why not the system's items: AppKit snaps its toolbar when items are added, removed, shown or hidden —
 /// the glass jumps to its new size in one frame. Ours spring:
@@ -21,35 +21,48 @@ import SwiftUI // only for `Spring`, the spring maths SwiftUI and UIKit bars use
 /// Everything is stepped per display frame by the bar itself: constraint `animator()`s ignore custom
 /// timing curves, and NSToolbar lays items out in whole points, so the item's slot is rounded up and the
 /// glass placed inside it at fractional positions — otherwise it moves in uneven 1–4pt jumps.
+///
+/// An item with no pills hides, since the toolbar gives even an empty one a slot
+/// (`GlassToolbarMetrics.minimumSlotWidth`). Hiding moves the items around it, so it happens as the last
+/// pill starts to go rather than once it has gone: the pill finishes leaving where it was, over the
+/// toolbar, and nothing shifts a second later for no visible reason.
 @MainActor
 public final class GlassToolbarItem: NSToolbarItem {
 
     /// The edge the pills stay put against while their widths change; the item grows away from it.
     public enum Anchor: Sendable { case leading, trailing }
 
+    public let anchor: Anchor
     private let bar: GlassPillBar
     /// Groups waiting for the toolbar to put the view back after unhiding the item.
     private var pendingReveal: [[NSView]]?
 
     public init(itemIdentifier: NSToolbarItem.Identifier, anchor: Anchor = .trailing) {
+        self.anchor = anchor
         bar = GlassPillBar(anchor: anchor)
         super.init(itemIdentifier: itemIdentifier)
         view = bar
         isBordered = false
         bar.debugName = itemIdentifier.rawValue
-        // Empty, the item hides: the toolbar gives even a zero-width item a 36pt slot.
-        bar.onSettledEmpty = { [weak self] in
+        let hideWhenEmpty = { [weak self] in
             guard let self, pendingReveal == nil, bar.groups.isEmpty else { return }
             isHidden = true
         }
+        bar.onSettledEmpty = hideWhenEmpty
+        bar.onMovedToOverlay = hideWhenEmpty
+        bar.onMovedToWindow = { [weak self] in self?.watchNeighbours() }
+        updateEdgeMargins()
     }
 
     /// The pills, as last set: one array of views per pill.
     public var groups: [[NSView]] { pendingReveal ?? bar.groups }
 
     /// Sets the pills, animating from what is on screen. Calling it again with the same groups is cheap
-    /// and re-measures the views, so a view whose size changed (a glyph's inset) is followed.
+    /// and re-measures the views, so a view whose size changed is followed.
     public func setGroups(_ groups: [[NSView]], animated: Bool = true) {
+        defer {
+            if automaticallyUpdatesMenuFormRepresentation { updateMenuFormRepresentation() }
+        }
         if pendingReveal != nil {
             pendingReveal = groups
             return
@@ -81,11 +94,93 @@ public final class GlassToolbarItem: NSToolbarItem {
         set { bar.buttonSpacing = newValue }
     }
 
-    /// For pills drawn over something with an appearance of its own — the open letter. `nil` follows
-    /// the window.
+    /// For pills drawn over something with an appearance of its own — a document under the toolbar.
+    /// `nil` follows the window.
     public var contentAppearance: NSAppearance? {
         get { bar.appearance }
         set { bar.appearance = newValue }
+    }
+
+    // MARK: Edge margins
+
+    /// The room kept clear either side of the pills. The system pads the slots of its own glass items;
+    /// an item with a view of its own, as this is, gets a slot the exact size of the view, so the padding
+    /// is added here. `.automatic` follows the system's rule from the item's neighbours.
+    public var edgeMargins: EdgeMarginRule = .automatic {
+        didSet { updateEdgeMargins() }
+    }
+
+    /// The margins in use: `edgeMargins` resolved against the toolbar as it is now.
+    public private(set) var resolvedEdgeMargins = EdgeMargins(leading: 0, trailing: 0)
+
+    /// Works `.automatic` margins out again. Done whenever the toolbar's items are added, removed, shown
+    /// or hidden, and whenever the pills are set; call it after anything else that changes what is next
+    /// to the item.
+    public func updateEdgeMargins() {
+        let margins: EdgeMargins
+        switch edgeMargins {
+        case .fixed(let fixed):
+            margins = fixed
+        case .automatic:
+            if let items = toolbar?.items, let index = items.firstIndex(where: { $0 === self }) {
+                margins = GlassToolbarLayout.margins(
+                    forItemAt: index,
+                    among: items.map { .init(identifier: $0.itemIdentifier, isHidden: $0.isHidden) })
+            } else {
+                // Not in a toolbar yet. The anchored edge is the one facing something fixed; the pills
+                // grow from it, usually into a flexible space.
+                let margin = GlassToolbarMetrics.edgeMargin
+                margins = anchor == .leading ? .init(leading: margin, trailing: 0) : .init(leading: 0, trailing: margin)
+            }
+        }
+        resolvedEdgeMargins = margins
+        bar.setMargins(anchored: anchor == .leading ? margins.leading : margins.trailing,
+                       far: anchor == .leading ? margins.trailing : margins.leading)
+    }
+
+    private weak var watchedToolbar: NSToolbar?
+    private var neighbourObservations: [NSKeyValueObservation] = []
+
+    /// Follows the toolbar's other items coming, going and hiding, each of which can change the margins.
+    private func watchNeighbours() {
+        updateEdgeMargins()
+        guard let toolbar else { return }
+        if watchedToolbar !== toolbar {
+            let center = NotificationCenter.default
+            for name in [NSToolbar.willAddItemNotification, NSToolbar.didRemoveItemNotification] {
+                center.removeObserver(self, name: name, object: watchedToolbar)
+                center.addObserver(self, selector: #selector(toolbarItemsChanged(_:)), name: name, object: toolbar)
+            }
+            watchedToolbar = toolbar
+        }
+        neighbourObservations = toolbar.items.filter { $0 !== self }.map { item in
+            item.observe(\.isHidden) { [weak self] _, _ in
+                // After the toolbar is done with the change being reported.
+                DispatchQueue.main.async { self?.updateEdgeMargins() }
+            }
+        }
+    }
+
+    @objc private func toolbarItemsChanged(_ notification: Notification) {
+        // The item is added after the "will add" notification.
+        DispatchQueue.main.async { [weak self] in self?.watchNeighbours() }
+    }
+
+    // MARK: Overflow menu
+
+    /// Whether `menuFormRepresentation` is kept in step with the pills, so the item's buttons are in the
+    /// toolbar's overflow menu when the window is too narrow for it. Turn off to supply your own.
+    public var automaticallyUpdatesMenuFormRepresentation = true
+
+    /// The menu item for a view that is not a button, or to replace a button's. Buttons get one made
+    /// from their accessibility label (or tool tip, or title) and image, which presses the button.
+    public var menuItemProvider: ((NSView) -> NSMenuItem?)?
+
+    /// Rebuilds `menuFormRepresentation` from the pills: one menu item for a lone button, otherwise the
+    /// item's `label` with the buttons in a submenu. Done on every `setGroups`; call it after changing a
+    /// button's label or image on its own.
+    public func updateMenuFormRepresentation() {
+        menuFormRepresentation = GlassToolbarMenu.representation(for: groups, title: label, provider: menuItemProvider)
     }
 }
 
@@ -102,15 +197,6 @@ final class GlassPillBar: NSView {
     /// just under the gap, so they are apart at rest and bridge while one reaches across.
     static let gap: CGFloat = 8
     private static let mergeSpacing: CGFloat = 7
-    /// Kept clear between the anchored edge of the item's slot and the first pill.
-    ///
-    /// The toolbar pads the slot of one of its own glass items by 4pt on every side that does not face a
-    /// flexible space: the system's Back button sat 4pt in from the column separator, and its pills 4pt
-    /// short of the separator and of the window's edge (8pt from the edge itself). An item with a view of
-    /// its own, as this one is, gets a slot the exact size of the view, so without this the pills sit 4pt
-    /// closer to those edges than the sidebar toggle next to them. The anchored edge is the one facing
-    /// something fixed; the other side grows into a flexible space, where the system pads nothing either.
-    static let anchoredEdgeMargin: CGFloat = 4
 
     /// Fitted to a recording of iOS 27 bar buttons: half way in ~180ms, 90% in ~330ms.
     nonisolated static let spring = Spring(duration: 0.675, bounce: 0.16)
@@ -142,6 +228,27 @@ final class GlassPillBar: NSView {
 
     /// Called when the motion has ended with no pills left.
     var onSettledEmpty: (() -> Void)?
+    /// Called when the last pills, on their way out, have been taken out of the toolbar to finish over it.
+    var onMovedToOverlay: (() -> Void)?
+    /// Called once the view is in a window and measured there, each time it gets there.
+    var onMovedToWindow: (() -> Void)?
+
+    /// Kept clear between the edges of the slot and the pills: beside the anchored edge, and beyond the
+    /// last pill. See `GlassToolbarItem.edgeMargins`.
+    private(set) var anchoredMargin: CGFloat = GlassToolbarMetrics.edgeMargin
+    private(set) var farMargin: CGFloat = 0
+
+    func setMargins(anchored: CGFloat, far: CGFloat) {
+        guard anchored != anchoredMargin || far != farMargin else { return }
+        anchoredMargin = anchored
+        farMargin = far
+        // At rest the slot and the pills follow at once; mid-motion the next frame takes them up.
+        if displayLink == nil { place(at: clock(CACurrentMediaTime())) }
+    }
+
+    /// Where the pills are while the last of them leave: over the toolbar, in the window's frame view,
+    /// with the item already hidden. `nil` while they are in the item's own view.
+    private var overlay: GlassPillOverlay?
     /// Run once the view is next in a window (and measured there), instead of the usual settle.
     var whenInWindow: (() -> Void)?
 
@@ -173,9 +280,12 @@ final class GlassPillBar: NSView {
 
     func setGroups(_ newGroups: [[NSView]], animated: Bool) {
         let groups = newGroups.filter { !$0.isEmpty }.map { $0.map(member(for:)) }
+        // Pills are coming back while the last ones were still leaving over the toolbar: they carry on
+        // from where they are, in the item's view again.
+        if overlay != nil, !groups.isEmpty { leaveOverlay() }
         // In a window the buttons measure right, which is all animating needs; out of one there is
-        // nothing on screen to animate.
-        let animated = animated && window != nil
+        // nothing on screen to animate — unless the pills are finishing over the toolbar.
+        let animated = animated && (window != nil || overlay != nil)
         let now = clock(CACurrentMediaTime())
         #if DEBUG
         if GlassToolbarSelfCheck.isOn, !animated, window != nil,
@@ -265,7 +375,8 @@ final class GlassPillBar: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         guard window != nil else {
-            finish()
+            // Hidden with its pills still leaving over the toolbar: they finish there.
+            if overlay == nil { finish() }
             return
         }
         // Deferred: this runs inside the toolbar's own insertion pass, which ignores a width set now and
@@ -274,6 +385,7 @@ final class GlassPillBar: NSView {
         DispatchQueue.main.async { [weak self] in
             guard let self, window != nil else { return }
             isMeasured = true
+            onMovedToWindow?()
             if let whenInWindow {
                 self.whenInWindow = nil
                 whenInWindow()
@@ -297,7 +409,8 @@ final class GlassPillBar: NSView {
 
     private func startTicking() {
         guard displayLink == nil else { return }
-        let link = displayLink(target: self, selector: #selector(tick(_:)))
+        // A view's display link only runs while the view is on screen.
+        let link = (overlay ?? self).displayLink(target: self, selector: #selector(tick(_:)))
         link.add(to: .main, forMode: .common)
         displayLink = link
     }
@@ -309,8 +422,8 @@ final class GlassPillBar: NSView {
     }
 
     /// The bar's own animation time. While something moves it never advances more than `maxStep`
-    /// between two frames: when the main thread is busy — opening an email loads it, often right after
-    /// the change that started the motion — the motion pauses and carries on from where it was, rather
+    /// between two frames: when the main thread is busy — often right after the change that
+    /// started the motion, which loads whatever the new buttons are for — the motion pauses and carries on from where it was, rather
     /// than leaping to wherever the spring would have got to meanwhile. Core Animation's animations
     /// run outside the main thread and need no such care; these are stepped on it.
     private func clock(_ time: CFTimeInterval) -> CFTimeInterval {
@@ -342,6 +455,7 @@ final class GlassPillBar: NSView {
     private func finish() {
         displayLink?.invalidate()
         displayLink = nil
+        if overlay != nil { leaveOverlay() }
         for pill in pills where pill.isLeaving {
             pill.detach()
         }
@@ -352,18 +466,25 @@ final class GlassPillBar: NSView {
         place(at: clock(CACurrentMediaTime()))
         if pills.isEmpty { onSettledEmpty?() }
         #if DEBUG
-        if GlassToolbarSelfCheck.isOn {
-            // After the toolbar has laid the item out, and only if nothing started moving meanwhile.
-            DispatchQueue.main.async { [weak self] in
-                // Out of a window there is nothing on screen to check, and nothing is laid out.
-                guard let self, displayLink == nil, window != nil else { return }
-                selfCheck()
-            }
-        }
+        if GlassToolbarSelfCheck.isOn { scheduleSelfCheck(attemptsLeft: 10) }
         #endif
     }
 
     #if DEBUG
+    /// After the toolbar has laid the item out, and only if nothing started moving meanwhile. The
+    /// toolbar takes a pass or two to give a changed slot, longer for an item it has just put back, so a
+    /// slot it has not caught up with yet is waited for rather than reported.
+    private func scheduleSelfCheck(attemptsLeft: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            // Out of a window there is nothing on screen to check, and nothing is laid out.
+            guard let self, displayLink == nil, window != nil else { return }
+            if attemptsLeft > 0, needsLayout || abs(bounds.width - widthConstraint.constant) > 0.5 {
+                return scheduleSelfCheck(attemptsLeft: attemptsLeft - 1)
+            }
+            selfCheck()
+        }
+    }
+
     private var lastTrace: (time: CFTimeInterval, edges: [ObjectIdentifier: (near: CGFloat, far: CGFloat)], moving: Bool, infos: [ObjectIdentifier: String])?
 
     /// A pill edge moving further in one frame than the spring ever does (~8pt at its fastest, for the
@@ -408,7 +529,8 @@ final class GlassPillBar: NSView {
             problems += pill.debugProblems(in: bounds).map { "pill \(index): \($0)" }
         }
         let widths = pills.map(\.restWidth)
-        let expected = Self.slotWidth(forPillsSpanning: widths.reduce(0, +) + Self.gap * CGFloat(max(0, widths.count - 1)))
+        let expected = slot(forPillsSpanning: widths.reduce(0, +) + Self.gap * CGFloat(max(0, widths.count - 1)))
+        if overlay != nil { problems.append("pills still over the toolbar") }
         if abs(widthConstraint.constant - expected) > 0.5 {
             problems.append("slot \(widthConstraint.constant) for pills needing \(expected)")
         }
@@ -485,30 +607,83 @@ final class GlassPillBar: NSView {
         if GlassToolbarSelfCheck.isOn { traceJumps(at: now) }
         #endif
 
-        let slot = Self.slotWidth(forPillsSpanning: extent)
+        // The toolbar gives no slot under its minimum, so once the last pills have shrunk past it the
+        // item cannot follow them down: it would sit in a slot too wide until they were gone, and the
+        // items around it would jump when it finally hid. They jump now instead, with the change that
+        // causes it, and the pills finish over the toolbar.
+        if overlay == nil, window != nil, !pills.isEmpty, pills.allSatisfy(\.isLeaving),
+           GlassToolbarLayout.slotWidth(forPillsSpanning: extent, margins: anchoredMargin + farMargin) < GlassToolbarMetrics.minimumSlotWidth {
+            moveToOverlay()
+        }
+        guard overlay == nil else { return applyPlacements() }
+
+        let slot = slot(forPillsSpanning: extent)
         if widthConstraint.constant != slot {
             widthConstraint.constant = slot
         }
         needsLayout = true
     }
 
-    /// The slot for pills reaching `extent` from the anchored edge: whole points, as the toolbar lays
-    /// items out, with the margin the system leaves its own pills. Nothing for no pills, so an emptied
-    /// item takes no room in the moment before it hides.
-    static func slotWidth(forPillsSpanning extent: CGFloat) -> CGFloat {
-        guard extent > 0.001 else { return 0 }
-        return (extent + anchoredEdgeMargin - 0.001).rounded(.up)
+    /// The slot to ask the toolbar for. Never under the toolbar's minimum while there are pills: it
+    /// would give the minimum anyway and centre the view in it, so a pill growing in from nothing would
+    /// drift from the middle of the slot to its edge instead of growing from the edge.
+    private func slot(forPillsSpanning extent: CGFloat) -> CGFloat {
+        let needed = GlassToolbarLayout.slotWidth(forPillsSpanning: extent, margins: anchoredMargin + farMargin)
+        return pills.isEmpty ? 0 : max(GlassToolbarMetrics.minimumSlotWidth, needed)
+    }
+
+    // MARK: Leaving over the toolbar
+
+    private func moveToOverlay() {
+        // The window's frame view: the nearest view that is still there once the item is hidden.
+        guard let frameView = window?.contentView?.superview else { return }
+        let host = GlassPillOverlay(frame: convert(bounds, to: frameView))
+        host.appearance = effectiveAppearance
+        frameView.addSubview(host)
+        host.addSubview(container)
+        overlay = host
+        // The link ran off this view, which is about to leave the window.
+        let wasTicking = displayLink != nil
+        displayLink?.invalidate()
+        displayLink = nil
+        if wasTicking { startTicking() }
+        onMovedToOverlay?()
+    }
+
+    private func leaveOverlay() {
+        guard let host = overlay else { return }
+        overlay = nil
+        addSubview(container)
+        host.removeFromSuperview()
+        // As for moving there: the link ran off the overlay.
+        let wasTicking = displayLink != nil
+        displayLink?.invalidate()
+        displayLink = nil
+        if wasTicking, window != nil { startTicking() }
+        needsLayout = true
     }
 
     override func layout() {
         super.layout()
-        container.frame = bounds
+        if overlay == nil { applyPlacements() }
+    }
+
+    /// Puts the glass where `place(at:)` worked out, in whichever view the pills are in.
+    private func applyPlacements() {
+        let host = overlay?.bounds ?? bounds
+        container.frame = host
         stage.frame = container.bounds
         for pill in pills {
             guard let placement = placements[ObjectIdentifier(pill)] else { continue }
-            pill.apply(placement, in: bounds, anchor: anchor)
+            pill.apply(placement, in: host, anchor: anchor, margin: anchoredMargin)
         }
     }
+}
+
+/// Holds the last pills of an item over the toolbar while they finish leaving. Looks only: clicks go to
+/// whatever is underneath.
+private final class GlassPillOverlay: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 // MARK: - Pill
@@ -708,7 +883,12 @@ private final class GlassPill {
         morphStart = nil
         slideProgress = .rest(1)
         presence = .rest(1)
-        for view in members { view.alphaValue = 1 }
+        for view in members {
+            view.alphaValue = 1
+            // A transition can be left on a view whose pill was taken out of the window part-way —
+            // hidden as it left, then wanted again — and never run to its end. At rest nothing is blurred.
+            GlassToolbarTransition.reset(view)
+        }
         if remeasure { updateGroupPositions() }
         width = .rest(slotFrames().last?.maxX ?? 0)
     }
@@ -808,8 +988,7 @@ private final class GlassPill {
         }
     }
 
-    func apply(_ placement: Placement, in bounds: NSRect, anchor: GlassToolbarItem.Anchor) {
-        let margin = GlassPillBar.anchoredEdgeMargin
+    func apply(_ placement: Placement, in bounds: NSRect, anchor: GlassToolbarItem.Anchor, margin: CGFloat) {
         let x: (CGFloat) -> CGFloat = anchor == .trailing
             ? { bounds.maxX - margin - $0 }
             : { bounds.minX + margin + $0 }
@@ -889,7 +1068,7 @@ private struct GlassSpringTrack {
 
 // MARK: - Hosting
 
-/// Lays out a view that sizes itself with constraints (the Rive glyphs) inside a frame-based pill.
+/// Lays out a view that sizes itself with constraints inside a frame-based pill.
 @MainActor
 final class GlassPillMemberHost: NSView {
     let hosted: NSView
